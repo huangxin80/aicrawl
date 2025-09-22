@@ -38,7 +38,26 @@ export function activate(context: vscode.ExtensionContext) {
         chatViewProvider.clearChat();
     });
 
-    context.subscriptions.push(clearChatCommand);
+    /**
+     * 注册切换浏览器模式命令
+     */
+    const toggleBrowserModeCommand = vscode.commands.registerCommand('crawler-analyzer.toggleBrowserMode', async () => {
+        const config = vscode.workspace.getConfiguration('crawler-analyzer');
+        const currentMode = config.get('useExistingBrowser', false);
+        
+        const newMode = !currentMode;
+        await config.update('useExistingBrowser', newMode, vscode.ConfigurationTarget.Global);
+        
+        const modeText = newMode ? '连接现有浏览器' : '启动新浏览器';
+        vscode.window.showInformationMessage(
+            `浏览器模式已切换为: ${modeText}\n${newMode ? '注意：请确保浏览器已启动并开启远程调试 (--remote-debugging-port=9222)' : ''}`
+        );
+        
+        // 通知聊天视图更新配置
+        chatViewProvider.updateBrowserConfig();
+    });
+
+    context.subscriptions.push(clearChatCommand, toggleBrowserModeCommand);
 }
 
 /**

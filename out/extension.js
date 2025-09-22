@@ -36,22 +36,16 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.activate = activate;
 exports.deactivate = deactivate;
 /**
- * 增强版JS爬虫分析器 - VS Code扩展主入口文件
- * 集成浏览器控制、网络监控、语义搜索等功能
+ * JS爬虫分析器 - VS Code扩展主入口文件
  */
 const vscode = __importStar(require("vscode"));
 const CrawlerChatView_1 = require("./webview/CrawlerChatView");
-const EnhancedCrawlerService_1 = require("./services/EnhancedCrawlerService");
-const BrowserController_1 = require("./services/BrowserController");
 /**
  * 插件激活时调用
  * @param context - VS Code扩展上下文
  */
 function activate(context) {
-    console.log('增强版JS爬虫分析器插件已激活!');
-    // 初始化增强服务
-    const enhancedCrawlerService = new EnhancedCrawlerService_1.EnhancedCrawlerService(context.extensionUri);
-    const browserController = new BrowserController_1.BrowserController(context.extensionUri);
+    console.log('JS爬虫分析器插件已激活!');
     /**
      * 创建聊天视图提供程序
      */
@@ -71,93 +65,19 @@ function activate(context) {
         chatViewProvider.clearChat();
     });
     /**
-     * 注册浏览器控制命令
+     * 注册切换浏览器模式命令
      */
-    const showBrowserTabsCommand = vscode.commands.registerCommand('crawler-analyzer.showBrowserTabs', async () => {
-        try {
-            await browserController.initialize();
-            const browserState = await browserController.getWindowsAndTabs();
-            const message = `🌐 浏览器状态：\n窗口数：${browserState.windowCount}\n标签页数：${browserState.tabCount}\n\n窗口详情：\n${browserState.windows.map(window => `窗口 ${window.windowId}:\n${window.tabs.map(tab => `  - ${tab.title} (${tab.url})`).join('\n')}`).join('\n\n')}`;
-            vscode.window.showInformationMessage(message);
-        }
-        catch (error) {
-            vscode.window.showErrorMessage(`获取浏览器信息失败: ${error}`);
-        }
+    const toggleBrowserModeCommand = vscode.commands.registerCommand('crawler-analyzer.toggleBrowserMode', async () => {
+        const config = vscode.workspace.getConfiguration('crawler-analyzer');
+        const currentMode = config.get('useExistingBrowser', false);
+        const newMode = !currentMode;
+        await config.update('useExistingBrowser', newMode, vscode.ConfigurationTarget.Global);
+        const modeText = newMode ? '连接现有浏览器' : '启动新浏览器';
+        vscode.window.showInformationMessage(`浏览器模式已切换为: ${modeText}\n${newMode ? '注意：请确保浏览器已启动并开启远程调试 (--remote-debugging-port=9222)' : ''}`);
+        // 通知聊天视图更新配置
+        chatViewProvider.updateBrowserConfig();
     });
-    /**
-     * 注册截图命令
-     */
-    const takeScreenshotCommand = vscode.commands.registerCommand('crawler-analyzer.takeScreenshot', async () => {
-        try {
-            await browserController.initialize();
-            const screenshot = await browserController.screenshot({
-                fullPage: true,
-                format: 'png'
-            });
-            // 保存截图到工作区
-            if (vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders[0]) {
-                const workspaceUri = vscode.workspace.workspaceFolders[0].uri;
-                const screenshotPath = vscode.Uri.joinPath(workspaceUri, `screenshot_${Date.now()}.png`);
-                // 将base64转换为buffer并保存
-                const buffer = Buffer.from(screenshot, 'base64');
-                await vscode.workspace.fs.writeFile(screenshotPath, buffer);
-                vscode.window.showInformationMessage(`截图已保存: ${screenshotPath.fsPath}`);
-            }
-            else {
-                vscode.window.showWarningMessage('未找到工作区，无法保存截图');
-            }
-        }
-        catch (error) {
-            vscode.window.showErrorMessage(`截图失败: ${error}`);
-        }
-    });
-    /**
-     * 注册增强分析命令
-     */
-    const enhancedAnalysisCommand = vscode.commands.registerCommand('crawler-analyzer.enhancedAnalysis', async () => {
-        const url = await vscode.window.showInputBox({
-            prompt: '输入要分析的网站URL',
-            placeHolder: 'https://example.com'
-        });
-        if (!url) {
-            return;
-        }
-        try {
-            await vscode.window.withProgress({
-                location: vscode.ProgressLocation.Notification,
-                title: '正在进行增强分析...',
-                cancellable: false
-            }, async (progress) => {
-                progress.report({ message: '初始化服务...' });
-                await enhancedCrawlerService.initialize();
-                progress.report({ message: '分析网站...' });
-                const result = await enhancedCrawlerService.analyzeSite(url, {
-                    analysisDepth: 'comprehensive',
-                    includeScreenshots: true
-                });
-                progress.report({ message: '生成报告...' });
-                const report = enhancedCrawlerService.exportAnalysisResult(result, 'markdown');
-                // 创建并显示报告文档
-                const doc = await vscode.workspace.openTextDocument({
-                    content: report,
-                    language: 'markdown'
-                });
-                await vscode.window.showTextDocument(doc);
-            });
-        }
-        catch (error) {
-            vscode.window.showErrorMessage(`增强分析失败: ${error}`);
-        }
-    });
-    // 注册所有命令
-    context.subscriptions.push(clearChatCommand, showBrowserTabsCommand, takeScreenshotCommand, enhancedAnalysisCommand);
-    // 资源清理
-    context.subscriptions.push({
-        dispose: () => {
-            enhancedCrawlerService.dispose();
-            browserController.dispose();
-        }
-    });
+    context.subscriptions.push(clearChatCommand, toggleBrowserModeCommand);
 }
 /**
  * 插件停用时调用

@@ -43,11 +43,10 @@ const vscode = __importStar(require("vscode"));
 const child_process = __importStar(require("child_process"));
 const path = __importStar(require("path"));
 class AIAnalyzer {
-    genAI = null;
-    apiKey = '';
-    pythonPath = 'python';
-    _extensionUri;
     constructor(extensionUri) {
+        this.genAI = null;
+        this.apiKey = '';
+        this.pythonPath = 'python';
         this._extensionUri = extensionUri;
         // 尝试从配置中获取API Key
         this.loadApiKey();
@@ -112,7 +111,7 @@ class AIAnalyzer {
             throw new Error('Google Gemini API未配置，请先设置API Key');
         }
         try {
-            const model = this.genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+            const model = this.genAI.getGenerativeModel({ model: "gemini-pro" });
             // 构建分析prompt
             const prompt = this.buildAnalysisPrompt(jsFiles);
             console.log('开始AI分析...');
@@ -278,7 +277,7 @@ class AIAnalyzer {
             throw new Error('Google Gemini API未配置，请先设置API Key');
         }
         try {
-            const model = this.genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+            const model = this.genAI.getGenerativeModel({ model: "gemini-pro" });
             const prompt = `请快速分析以下JavaScript代码片段，识别可能的反爬机制：
 
 \`\`\`javascript
@@ -379,242 +378,6 @@ ${codeSnippet.substring(0, 4000)}
         });
     }
     /**
-     * 上传文件到Gemini API
-     * @param filePath - 文件路径
-     * @param displayName - 显示名称（可选）
-     * @returns 上传结果
-     */
-    async uploadFile(filePath, displayName) {
-        return new Promise((resolve, reject) => {
-            try {
-                console.log('开始上传文件到Gemini API...');
-                const scriptPath = path.join(__dirname, '..', '..', 'gemeni.py');
-                const args = ['--mode', 'upload', '--file-path', filePath];
-                if (displayName) {
-                    args.push('--display-name', displayName);
-                }
-                if (this.apiKey) {
-                    args.push('--api-key', this.apiKey);
-                }
-                console.log(`执行文件上传命令: ${this.pythonPath} ${scriptPath} ${args.join(' ')}`);
-                const child = child_process.spawn(this.pythonPath, [scriptPath, ...args], {
-                    cwd: process.cwd(),
-                    stdio: ['pipe', 'pipe', 'pipe'],
-                    shell: false
-                });
-                let stdout = '';
-                let stderr = '';
-                child.stdout.on('data', (data) => {
-                    stdout += data.toString('utf8');
-                });
-                child.stderr.on('data', (data) => {
-                    stderr += data.toString('utf8');
-                    console.log('Python stderr:', data.toString());
-                });
-                child.on('close', (code) => {
-                    console.log(`文件上传脚本退出，代码: ${code}`);
-                    if (code === 0) {
-                        try {
-                            const response = JSON.parse(stdout.trim());
-                            resolve(response);
-                        }
-                        catch (parseError) {
-                            console.error('解析文件上传响应失败:', parseError);
-                            reject(new Error(`解析响应失败: ${parseError.message}`));
-                        }
-                    }
-                    else {
-                        reject(new Error(`文件上传失败 (退出码: ${code}): ${stderr}`));
-                    }
-                });
-                child.on('error', (error) => {
-                    console.error('执行文件上传脚本时出错:', error);
-                    reject(new Error(`文件上传失败: ${error.message}`));
-                });
-                setTimeout(() => {
-                    child.kill('SIGTERM');
-                    reject(new Error('文件上传超时'));
-                }, 60000); // 60秒超时
-            }
-            catch (error) {
-                console.error('调用文件上传脚本时出错:', error);
-                reject(new Error(`文件上传失败: ${error.message}`));
-            }
-        });
-    }
-    /**
-     * 分析文件内容
-     * @param filePath - 文件路径
-     * @param prompt - 分析提示词
-     * @param customAnalysis - 自定义分析要求
-     * @returns 分析结果
-     */
-    async analyzeFile(filePath, prompt = '请分析这个文件的内容', customAnalysis) {
-        return new Promise((resolve, reject) => {
-            try {
-                console.log('开始分析文件...');
-                const scriptPath = path.join(__dirname, '..', '..', 'gemeni.py');
-                const args = ['--mode', 'file-analyze', '--file-path', filePath, '--message', prompt];
-                if (customAnalysis) {
-                    args.push('--custom-analysis', customAnalysis);
-                }
-                if (this.apiKey) {
-                    args.push('--api-key', this.apiKey);
-                }
-                console.log(`执行文件分析命令: ${this.pythonPath} ${scriptPath} ${args.join(' ')}`);
-                const child = child_process.spawn(this.pythonPath, [scriptPath, ...args], {
-                    cwd: process.cwd(),
-                    stdio: ['pipe', 'pipe', 'pipe'],
-                    shell: false
-                });
-                let stdout = '';
-                let stderr = '';
-                child.stdout.on('data', (data) => {
-                    stdout += data.toString('utf8');
-                });
-                child.stderr.on('data', (data) => {
-                    stderr += data.toString('utf8');
-                    console.log('Python stderr:', data.toString());
-                });
-                child.on('close', (code) => {
-                    console.log(`文件分析脚本退出，代码: ${code}`);
-                    if (code === 0) {
-                        try {
-                            const response = JSON.parse(stdout.trim());
-                            resolve(response);
-                        }
-                        catch (parseError) {
-                            console.error('解析文件分析响应失败:', parseError);
-                            reject(new Error(`解析响应失败: ${parseError.message}`));
-                        }
-                    }
-                    else {
-                        reject(new Error(`文件分析失败 (退出码: ${code}): ${stderr}`));
-                    }
-                });
-                child.on('error', (error) => {
-                    console.error('执行文件分析脚本时出错:', error);
-                    reject(new Error(`文件分析失败: ${error.message}`));
-                });
-                setTimeout(() => {
-                    child.kill('SIGTERM');
-                    reject(new Error('文件分析超时'));
-                }, 120000); // 120秒超时，分析可能需要更长时间
-            }
-            catch (error) {
-                console.error('调用文件分析脚本时出错:', error);
-                reject(new Error(`文件分析失败: ${error.message}`));
-            }
-        });
-    }
-    /**
-     * 列出已上传的文件
-     * @returns 文件列表
-     */
-    async listFiles() {
-        return new Promise((resolve, reject) => {
-            try {
-                console.log('获取文件列表...');
-                const scriptPath = path.join(__dirname, '..', '..', 'gemeni.py');
-                const args = ['--mode', 'list-files'];
-                if (this.apiKey) {
-                    args.push('--api-key', this.apiKey);
-                }
-                const child = child_process.spawn(this.pythonPath, [scriptPath, ...args], {
-                    cwd: process.cwd(),
-                    stdio: ['pipe', 'pipe', 'pipe'],
-                    shell: false
-                });
-                let stdout = '';
-                let stderr = '';
-                child.stdout.on('data', (data) => {
-                    stdout += data.toString('utf8');
-                });
-                child.stderr.on('data', (data) => {
-                    stderr += data.toString('utf8');
-                });
-                child.on('close', (code) => {
-                    if (code === 0) {
-                        try {
-                            const response = JSON.parse(stdout.trim());
-                            resolve(response);
-                        }
-                        catch (parseError) {
-                            reject(new Error(`解析响应失败: ${parseError.message}`));
-                        }
-                    }
-                    else {
-                        reject(new Error(`获取文件列表失败 (退出码: ${code}): ${stderr}`));
-                    }
-                });
-                child.on('error', (error) => {
-                    reject(new Error(`获取文件列表失败: ${error.message}`));
-                });
-                setTimeout(() => {
-                    child.kill('SIGTERM');
-                    reject(new Error('获取文件列表超时'));
-                }, 30000);
-            }
-            catch (error) {
-                reject(new Error(`获取文件列表失败: ${error.message}`));
-            }
-        });
-    }
-    /**
-     * 删除已上传的文件
-     * @param fileName - 文件名称
-     * @returns 删除结果
-     */
-    async deleteFile(fileName) {
-        return new Promise((resolve, reject) => {
-            try {
-                console.log('删除文件...');
-                const scriptPath = path.join(__dirname, '..', '..', 'gemeni.py');
-                const args = ['--mode', 'delete-file', '--file-name', fileName];
-                if (this.apiKey) {
-                    args.push('--api-key', this.apiKey);
-                }
-                const child = child_process.spawn(this.pythonPath, [scriptPath, ...args], {
-                    cwd: process.cwd(),
-                    stdio: ['pipe', 'pipe', 'pipe'],
-                    shell: false
-                });
-                let stdout = '';
-                let stderr = '';
-                child.stdout.on('data', (data) => {
-                    stdout += data.toString('utf8');
-                });
-                child.stderr.on('data', (data) => {
-                    stderr += data.toString('utf8');
-                });
-                child.on('close', (code) => {
-                    if (code === 0) {
-                        try {
-                            const response = JSON.parse(stdout.trim());
-                            resolve(response);
-                        }
-                        catch (parseError) {
-                            reject(new Error(`解析响应失败: ${parseError.message}`));
-                        }
-                    }
-                    else {
-                        reject(new Error(`删除文件失败 (退出码: ${code}): ${stderr}`));
-                    }
-                });
-                child.on('error', (error) => {
-                    reject(new Error(`删除文件失败: ${error.message}`));
-                });
-                setTimeout(() => {
-                    child.kill('SIGTERM');
-                    reject(new Error('删除文件超时'));
-                }, 30000);
-            }
-            catch (error) {
-                reject(new Error(`删除文件失败: ${error.message}`));
-            }
-        });
-    }
-    /**
      * 获取当前API状态
      * @returns API配置状态
      */
@@ -636,7 +399,7 @@ ${codeSnippet.substring(0, 4000)}
             };
         }
         try {
-            const model = this.genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
+            const model = this.genAI.getGenerativeModel({ model: "gemini-pro" });
             const result = await model.generateContent('请回复"API连接成功"');
             const response = await result.response;
             const text = response.text();
@@ -654,4 +417,3 @@ ${codeSnippet.substring(0, 4000)}
     }
 }
 exports.AIAnalyzer = AIAnalyzer;
-//# sourceMappingURL=AIAnalyzer.js.map

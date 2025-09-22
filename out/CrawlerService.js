@@ -42,16 +42,15 @@ const playwright_1 = require("playwright");
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
 class CrawlerService {
-    browser = null;
-    context = null;
-    page = null;
-    capturedFiles = [];
-    capturedUrls = [];
-    visitedRoutes = [];
-    config;
-    // 固定的catch文件夹路径
-    catchDir = 'D:\\crawler\\crawler\\catch';
     constructor(config = {}) {
+        this.browser = null;
+        this.context = null;
+        this.page = null;
+        this.capturedFiles = [];
+        this.capturedUrls = [];
+        this.visitedRoutes = [];
+        // 固定的catch文件夹路径
+        this.catchDir = 'D:\\crawler\\crawler\\catch';
         this.config = {
             useExistingBrowser: false,
             debugPort: 9222,
@@ -2296,4 +2295,3 @@ class CrawlerService {
     }
 }
 exports.CrawlerService = CrawlerService;
-//# sourceMappingURL=CrawlerService.js.map

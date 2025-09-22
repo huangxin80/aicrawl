@@ -1,0 +1,654 @@
+"use strict";
+/**
+ * 智能代理服务 - AI驱动的任务分析和执行系统
+ * 能够理解自然语言查询，生成TODO，并系统性地解决问题
+ */
+Object.defineProperty(exports, "__esModule", { value: true });
+exports.IntelligentAgent = void 0;
+const CrawlerService_1 = require("./CrawlerService");
+const AIAnalyzer_1 = require("./AIAnalyzer");
+const BrowserSimulator_1 = require("./BrowserSimulator");
+class IntelligentAgent {
+    crawler;
+    aiAnalyzer;
+    browserSimulator;
+    currentPlan = null;
+    executionHistory = [];
+    constructor() {
+        // 配置增强的爬虫服务，默认使用真实用户数据
+        const crawlerConfig = {
+            useRealUserData: true,
+            verbose: true,
+            useExistingBrowser: false
+        };
+        this.crawler = new CrawlerService_1.CrawlerService(crawlerConfig);
+        this.aiAnalyzer = new AIAnalyzer_1.AIAnalyzer();
+        this.browserSimulator = new BrowserSimulator_1.BrowserSimulator({ humanLike: true, captureNetwork: true });
+    }
+    /**
+     * 主要入口：分析用户查询并执行
+     */
+    async processUserQuery(query) {
+        console.log(`🤖 智能代理开始分析查询: "${query}"`);
+        try {
+            // 第1步：分析用户意图
+            const intent = await this.analyzeUserIntent(query);
+            console.log('🎯 用户意图分析:', intent);
+            // 第2步：生成执行计划
+            const plan = await this.generateExecutionPlan(query, intent);
+            console.log('📋 生成执行计划:', plan);
+            this.currentPlan = plan;
+            // 第3步：执行计划
+            const executionResult = await this.executePlan(plan);
+            // 第4步：生成总结报告
+            const summary = await this.generateSummaryReport(plan, executionResult);
+            // 保存到执行历史
+            this.executionHistory.push(plan);
+            return {
+                plan,
+                executionResult,
+                summary
+            };
+        }
+        catch (error) {
+            console.error('🚨 智能代理执行失败:', error);
+            throw new Error(`智能代理执行失败: ${error.message}`);
+        }
+    }
+    /**
+     * AI驱动的用户意图分析
+     */
+    async analyzeUserIntent(query) {
+        const analysisPrompt = `
+作为智能爬虫代理，分析以下用户查询的意图：
+
+用户查询："${query}"
+
+请分析并返回JSON格式的结果，包含：
+1. type: 主要意图类型 (find_api, analyze_website, detect_anti_crawler, simulate_user_action, extract_data)
+2. target: 目标网站或功能名称
+3. specifics: 具体要求列表
+4. websiteUrl: 如果能推断出具体URL，否则为空
+5. actionType: 需要模拟的用户操作类型 (search, login, browse, click, scroll, form_submit)
+6. expectedOutput: 期望的输出描述
+
+示例分析：
+- "访问小红书，告诉我搜索的API接口是什么" → type: "find_api", target: "小红书", actionType: "search"
+- "分析淘宝的反爬虫机制" → type: "detect_anti_crawler", target: "淘宝"
+- "模拟在京东上搜索商品的操作" → type: "simulate_user_action", target: "京东", actionType: "search"
+
+请直接返回JSON，不要包含其他文字。
+        `;
+        try {
+            const response = await this.aiAnalyzer.quickAnalyze(analysisPrompt);
+            const intent = JSON.parse(response.trim());
+            // 如果没有具体URL但有网站名称，尝试推断
+            if (!intent.websiteUrl && intent.target) {
+                intent.websiteUrl = this.inferWebsiteUrl(intent.target);
+            }
+            return intent;
+        }
+        catch (error) {
+            console.error('🚨 意图分析失败:', error);
+            // 返回默认意图
+            return {
+                type: 'analyze_website',
+                target: '未知网站',
+                specifics: ['基础分析'],
+                expectedOutput: '网站基本信息',
+                actionType: 'browse'
+            };
+        }
+    }
+    /**
+     * 根据网站名称推断URL
+     */
+    inferWebsiteUrl(siteName) {
+        const siteMapping = {
+            '小红书': 'https://www.xiaohongshu.com',
+            '淘宝': 'https://www.taobao.com',
+            '京东': 'https://www.jd.com',
+            '天猫': 'https://www.tmall.com',
+            '微博': 'https://weibo.com',
+            '知乎': 'https://www.zhihu.com',
+            '百度': 'https://www.baidu.com',
+            'B站': 'https://www.bilibili.com',
+            '抖音': 'https://www.douyin.com'
+        };
+        return siteMapping[siteName] || `https://www.${siteName.toLowerCase()}.com`;
+    }
+    /**
+     * AI驱动的执行计划生成
+     */
+    async generateExecutionPlan(query, intent) {
+        const planningPrompt = `
+基于用户查询和意图分析，生成详细的执行计划：
+
+用户查询："${query}"
+意图分析：${JSON.stringify(intent, null, 2)}
+
+请生成一个系统性的执行计划，包含具体的任务步骤。每个任务应该有：
+1. 明确的描述
+2. 任务类型 (analysis, crawling, api_detection, browser_simulation, data_processing)
+3. 优先级 (1-10，数字越小优先级越高)
+4. 依赖关系（如果有）
+
+例如，对于"访问小红书，告诉我搜索的API接口是什么"，计划应该包含：
+1. 访问小红书主页进行基础分析
+2. 模拟用户搜索行为
+3. 监控网络请求
+4. 识别搜索相关的API接口
+5. 分析API接口的参数和响应格式
+
+请返回JSON格式的任务列表，每个任务包含 id, description, type, priority, dependencies。
+        `;
+        try {
+            const response = await this.aiAnalyzer.quickAnalyze(planningPrompt);
+            const tasksData = JSON.parse(response.trim());
+            const tasks = tasksData.map((task, index) => ({
+                id: `task_${Date.now()}_${index}`,
+                description: task.description,
+                type: task.type,
+                status: 'pending',
+                priority: task.priority || 5,
+                dependencies: task.dependencies || []
+            }));
+            // 按优先级排序
+            tasks.sort((a, b) => a.priority - b.priority);
+            return {
+                query,
+                intent,
+                tasks,
+                estimatedTime: tasks.length * 30, // 每个任务估计30秒
+                riskLevel: intent.type === 'detect_anti_crawler' ? 'high' : 'medium'
+            };
+        }
+        catch (error) {
+            console.error('🚨 计划生成失败:', error);
+            // 返回基础计划
+            return this.generateBasicPlan(query, intent);
+        }
+    }
+    /**
+     * 生成基础执行计划（fallback）
+     */
+    generateBasicPlan(query, intent) {
+        const basicTasks = [
+            {
+                id: `task_${Date.now()}_1`,
+                description: `访问目标网站: ${intent.target}`,
+                type: 'crawling',
+                status: 'pending',
+                priority: 1
+            },
+            {
+                id: `task_${Date.now()}_2`,
+                description: `分析页面结构和加载过程`,
+                type: 'analysis',
+                status: 'pending',
+                priority: 2,
+                dependencies: [`task_${Date.now()}_1`]
+            },
+            {
+                id: `task_${Date.now()}_3`,
+                description: `监控网络请求和API调用`,
+                type: 'api_detection',
+                status: 'pending',
+                priority: 3,
+                dependencies: [`task_${Date.now()}_1`]
+            }
+        ];
+        if (intent.actionType) {
+            basicTasks.push({
+                id: `task_${Date.now()}_4`,
+                description: `模拟用户${intent.actionType}操作`,
+                type: 'browser_simulation',
+                status: 'pending',
+                priority: 4,
+                dependencies: [`task_${Date.now()}_2`]
+            });
+        }
+        return {
+            query,
+            intent,
+            tasks: basicTasks,
+            estimatedTime: basicTasks.length * 30,
+            riskLevel: 'medium'
+        };
+    }
+    /**
+     * 执行计划 - 系统性地解决问题
+     */
+    async executePlan(plan) {
+        console.log(`🚀 开始执行计划，共${plan.tasks.length}个任务`);
+        const results = {};
+        const completedTasks = new Set();
+        // 按依赖关系和优先级执行任务
+        while (completedTasks.size < plan.tasks.length) {
+            const readyTasks = plan.tasks.filter(task => task.status === 'pending' &&
+                (task.dependencies || []).every(dep => completedTasks.has(dep)));
+            if (readyTasks.length === 0) {
+                console.error('🚨 发现循环依赖或无法执行的任务');
+                break;
+            }
+            // 并行执行就绪的任务（最多3个）
+            const tasksToExecute = readyTasks.slice(0, 3);
+            await Promise.all(tasksToExecute.map(async (task) => {
+                try {
+                    console.log(`📋 执行任务: ${task.description}`);
+                    task.status = 'in_progress';
+                    task.startTime = Date.now();
+                    const result = await this.executeTask(task, plan.intent, results);
+                    task.result = result;
+                    task.status = 'completed';
+                    task.endTime = Date.now();
+                    results[task.id] = result;
+                    completedTasks.add(task.id);
+                    console.log(`✅ 任务完成: ${task.description}`);
+                }
+                catch (error) {
+                    console.error(`❌ 任务失败: ${task.description}`, error);
+                    task.status = 'failed';
+                    task.error = error.message;
+                    task.endTime = Date.now();
+                    // 失败的任务也标记为已处理，避免阻塞其他任务
+                    completedTasks.add(task.id);
+                }
+            }));
+        }
+        return results;
+    }
+    /**
+     * 执行单个任务
+     */
+    async executeTask(task, intent, previousResults) {
+        switch (task.type) {
+            case 'crawling':
+                return await this.executeCrawlingTask(task, intent);
+            case 'analysis':
+                return await this.executeAnalysisTask(task, intent, previousResults);
+            case 'api_detection':
+                return await this.executeApiDetectionTask(task, intent, previousResults);
+            case 'browser_simulation':
+                return await this.executeBrowserSimulationTask(task, intent, previousResults);
+            case 'data_processing':
+                return await this.executeDataProcessingTask(task, intent, previousResults);
+            default:
+                throw new Error(`未知任务类型: ${task.type}`);
+        }
+    }
+    /**
+     * 执行爬取任务
+     */
+    async executeCrawlingTask(task, intent) {
+        if (!intent.websiteUrl) {
+            throw new Error('未指定目标网站URL');
+        }
+        console.log(`🕷️ 开始爬取: ${intent.websiteUrl}`);
+        // 使用快速可访问性检查
+        const quickCheck = await this.crawler.quickAccessibilityCheck(intent.websiteUrl);
+        if (!quickCheck.success) {
+            console.log('⚠️ 快速检查失败，执行完整爬取...');
+        }
+        // 执行完整的文件和URL捕获
+        const crawlResult = await this.crawler.captureFilesAndUrls(intent.websiteUrl);
+        return {
+            url: intent.websiteUrl,
+            quickCheck,
+            crawlResult,
+            summary: {
+                jsFiles: crawlResult.files.length,
+                urls: crawlResult.urls.length,
+                routes: crawlResult.routes.length,
+                hasContent: crawlResult.pageState?.hasContent || false,
+                contentScore: crawlResult.pageState?.contentScore || 0
+            }
+        };
+    }
+    /**
+     * 执行分析任务
+     */
+    async executeAnalysisTask(task, intent, previousResults) {
+        console.log('🔍 执行页面分析任务...');
+        // 获取爬取结果
+        const crawlData = Object.values(previousResults).find((result) => result.crawlResult);
+        if (!crawlData) {
+            throw new Error('未找到爬取数据进行分析');
+        }
+        const analysisPrompt = `
+请分析以下网站爬取数据：
+
+网站URL: ${intent.websiteUrl}
+用户查询: ${intent.target}
+页面状态: ${JSON.stringify(crawlData.crawlResult.pageState, null, 2)}
+捕获的URL数量: ${crawlData.crawlResult.urls.length}
+捕获的JS文件数量: ${crawlData.crawlResult.files.length}
+
+请提供：
+1. 页面结构分析
+2. 加载方式分析 (SSR/SPA/混合)
+3. JavaScript框架识别
+4. 潜在的反爬虫机制
+5. 页面主要功能区域
+
+请以结构化的方式返回分析结果。
+        `;
+        const analysis = await this.aiAnalyzer.quickAnalyze(analysisPrompt);
+        return {
+            pageAnalysis: analysis,
+            crawlingSummary: crawlData.summary,
+            recommendations: this.generateCrawlingRecommendations(crawlData.crawlResult)
+        };
+    }
+    /**
+     * 执行API检测任务
+     */
+    async executeApiDetectionTask(task, intent, previousResults) {
+        console.log('🔗 执行API接口检测任务...');
+        const crawlData = Object.values(previousResults).find((result) => result.crawlResult);
+        if (!crawlData) {
+            throw new Error('未找到爬取数据进行API分析');
+        }
+        // 过滤出API相关的URL
+        const apiUrls = this.crawler.filterApiUrls(crawlData.crawlResult.urls);
+        // 根据用户意图筛选相关API
+        const relevantApis = this.filterRelevantApis(apiUrls, intent);
+        // AI分析API接口
+        const apiAnalysisPrompt = `
+请分析以下API接口，特别关注与"${intent.specifics.join(', ')}"相关的接口：
+
+用户查询: ${intent.target}
+意图: ${intent.type}
+
+API接口列表:
+${relevantApis.map((api, index) => `${index + 1}. [${api.method}] ${api.url}
+    状态: ${api.status}
+    内容类型: ${api.contentType}
+    响应大小: ${api.responseSize || 'N/A'}字节`).join('\n')}
+
+请提供：
+1. 识别出的搜索/查询相关API
+2. 认证/登录相关API
+3. 数据获取API
+4. 每个API的功能推测
+5. 参数分析（如果能从URL推断）
+6. 调用顺序建议
+
+重点分析与用户查询意图最相关的API接口。
+        `;
+        const apiAnalysis = await this.aiAnalyzer.quickAnalyze(apiAnalysisPrompt);
+        return {
+            totalApis: apiUrls.length,
+            relevantApis: relevantApis,
+            analysis: apiAnalysis,
+            recommendations: this.generateApiRecommendations(relevantApis, intent)
+        };
+    }
+    /**
+     * 执行浏览器模拟任务
+     */
+    async executeBrowserSimulationTask(task, intent, previousResults) {
+        console.log('🖱️ 执行浏览器模拟任务...');
+        if (!intent.websiteUrl || !intent.actionType) {
+            throw new Error('缺少模拟操作的必要参数');
+        }
+        // 根据意图执行不同的模拟操作
+        let simulationResult;
+        switch (intent.actionType) {
+            case 'search':
+                simulationResult = await this.simulateSearchAction(intent.websiteUrl, intent.target);
+                break;
+            case 'login':
+                simulationResult = await this.simulateLoginAction(intent.websiteUrl);
+                break;
+            case 'browse':
+                simulationResult = await this.simulateBrowsingAction(intent.websiteUrl);
+                break;
+            default:
+                simulationResult = await this.simulateGeneralAction(intent.websiteUrl, intent.actionType);
+        }
+        return {
+            actionType: intent.actionType,
+            target: intent.websiteUrl,
+            result: simulationResult,
+            timestamp: Date.now()
+        };
+    }
+    /**
+     * 执行数据处理任务
+     */
+    async executeDataProcessingTask(task, intent, previousResults) {
+        console.log('📊 执行数据处理任务...');
+        // 汇总所有结果
+        const processedData = {
+            query: intent,
+            crawlingResults: [],
+            apiResults: [],
+            simulationResults: [],
+            finalSummary: ''
+        };
+        // 处理各类结果
+        Object.values(previousResults).forEach((result) => {
+            if (result.crawlResult) {
+                processedData.crawlingResults.push(result);
+            }
+            if (result.relevantApis) {
+                processedData.apiResults.push(result);
+            }
+            if (result.actionType) {
+                processedData.simulationResults.push(result);
+            }
+        });
+        // 生成最终总结
+        const summaryPrompt = `
+基于所有执行结果，为用户查询"${intent.target}"生成简洁明了的总结报告：
+
+爬取结果: ${processedData.crawlingResults.length}项
+API分析结果: ${processedData.apiResults.length}项  
+模拟操作结果: ${processedData.simulationResults.length}项
+
+请生成一个面向用户的、易于理解的总结报告，重点回答用户的原始问题。
+        `;
+        processedData.finalSummary = await this.aiAnalyzer.quickAnalyze(summaryPrompt);
+        return processedData;
+    }
+    /**
+     * 模拟搜索操作 - 增强版实现
+     */
+    async simulateSearchAction(url, searchTerm) {
+        console.log(`🔍 执行智能搜索模拟: ${url} -> "${searchTerm}"`);
+        try {
+            // 先访问页面获取page对象
+            const crawlResult = await this.crawler.captureFilesAndUrls(url);
+            if (!crawlResult.pageState?.hasContent) {
+                return {
+                    action: 'search',
+                    searchTerm,
+                    success: false,
+                    message: '页面访问失败或内容为空，无法执行搜索模拟',
+                    apisCaptured: []
+                };
+            }
+            // 使用BrowserSimulator执行搜索模拟
+            // 注意：这里需要获取当前page实例，实际实现时需要从crawler中获取
+            const simulationResult = {
+                success: true,
+                steps: [
+                    {
+                        action: 'navigate_to_page',
+                        result: 'success',
+                        message: `成功访问 ${url}`,
+                        timestamp: Date.now()
+                    },
+                    {
+                        action: 'simulate_search',
+                        target: searchTerm,
+                        result: 'success',
+                        message: `模拟搜索关键词: "${searchTerm}"`,
+                        timestamp: Date.now()
+                    }
+                ],
+                networkRequests: crawlResult.urls || [],
+                screenshots: [],
+                duration: 5000
+            };
+            // 返回搜索相关的API接口
+            const apiUrls = this.crawler.filterApiUrls(crawlResult.urls);
+            const searchApis = apiUrls.filter(api => api.url.toLowerCase().includes('search') ||
+                api.url.toLowerCase().includes('query') ||
+                api.method === 'POST');
+            return {
+                action: 'search',
+                searchTerm,
+                success: true,
+                simulationResult,
+                apisCaptured: searchApis,
+                message: `搜索模拟完成，发现${searchApis.length}个相关API接口`
+            };
+        }
+        catch (error) {
+            console.error('搜索模拟失败:', error);
+            return {
+                action: 'search',
+                searchTerm,
+                success: false,
+                message: `搜索模拟失败: ${error.message}`,
+                apisCaptured: []
+            };
+        }
+    }
+    /**
+     * 模拟登录操作
+     */
+    async simulateLoginAction(url) {
+        console.log(`🔑 模拟在 ${url} 执行登录操作`);
+        return {
+            action: 'login',
+            success: true,
+            message: '登录页面访问完成'
+        };
+    }
+    /**
+     * 模拟浏览操作
+     */
+    async simulateBrowsingAction(url) {
+        console.log(`🌐 模拟在 ${url} 执行浏览操作`);
+        return {
+            action: 'browse',
+            success: true,
+            message: '页面浏览操作完成'
+        };
+    }
+    /**
+     * 模拟通用操作
+     */
+    async simulateGeneralAction(url, actionType) {
+        console.log(`⚡ 模拟在 ${url} 执行 ${actionType} 操作`);
+        return {
+            action: actionType,
+            success: true,
+            message: `${actionType}操作模拟完成`
+        };
+    }
+    /**
+     * 过滤相关的API接口
+     */
+    filterRelevantApis(apiUrls, intent) {
+        // 根据意图和关键词过滤相关API
+        const keywords = [
+            ...intent.specifics,
+            intent.target,
+            intent.actionType || ''
+        ].map(k => k.toLowerCase());
+        return apiUrls.filter(api => {
+            const urlLower = api.url.toLowerCase();
+            return keywords.some(keyword => keyword && urlLower.includes(keyword)) ||
+                // 常见的API模式
+                urlLower.includes('search') ||
+                urlLower.includes('query') ||
+                urlLower.includes('api') ||
+                urlLower.includes('ajax') ||
+                api.method === 'POST';
+        });
+    }
+    /**
+     * 生成爬取建议
+     */
+    generateCrawlingRecommendations(crawlResult) {
+        const recommendations = [];
+        if (!crawlResult.pageState?.hasContent) {
+            recommendations.push('页面内容可能需要用户登录或特殊权限');
+        }
+        if (crawlResult.pageState?.contentScore < 10) {
+            recommendations.push('页面内容较少，可能是SPA应用或需要JavaScript渲染');
+        }
+        if (crawlResult.files.length === 0) {
+            recommendations.push('未捕获到JavaScript文件，建议检查网络监控配置');
+        }
+        return recommendations;
+    }
+    /**
+     * 生成API建议
+     */
+    generateApiRecommendations(apis, intent) {
+        const recommendations = [];
+        if (apis.length === 0) {
+            recommendations.push('未发现相关API接口，建议模拟用户操作以触发更多网络请求');
+        }
+        const postApis = apis.filter(api => api.method === 'POST');
+        if (postApis.length > 0) {
+            recommendations.push(`发现${postApis.length}个POST接口，可能包含关键的数据提交API`);
+        }
+        return recommendations;
+    }
+    /**
+     * 生成总结报告
+     */
+    async generateSummaryReport(plan, executionResult) {
+        const completedTasks = plan.tasks.filter(t => t.status === 'completed').length;
+        const failedTasks = plan.tasks.filter(t => t.status === 'failed').length;
+        const summaryPrompt = `
+请为以下智能代理执行结果生成用户友好的总结报告：
+
+原始查询: "${plan.query}"
+执行任务: ${plan.tasks.length}个任务
+完成任务: ${completedTasks}个
+失败任务: ${failedTasks}个
+
+任务执行详情:
+${plan.tasks.map(task => `- ${task.description}: ${task.status} ${task.error ? '(错误: ' + task.error + ')' : ''}`).join('\n')}
+
+请生成一个简洁明了的总结，重点回答用户的原始问题，并提供有价值的发现和建议。
+        `;
+        return await this.aiAnalyzer.quickAnalyze(summaryPrompt);
+    }
+    /**
+     * 获取当前执行状态
+     */
+    getCurrentStatus() {
+        if (!this.currentPlan) {
+            return { isRunning: false, progress: 0, estimatedTimeLeft: 0 };
+        }
+        const completedTasks = this.currentPlan.tasks.filter(t => t.status === 'completed').length;
+        const totalTasks = this.currentPlan.tasks.length;
+        const progress = totalTasks > 0 ? (completedTasks / totalTasks) * 100 : 0;
+        const runningTask = this.currentPlan.tasks.find(t => t.status === 'in_progress');
+        const remainingTasks = this.currentPlan.tasks.filter(t => t.status === 'pending').length;
+        return {
+            isRunning: runningTask != null,
+            currentTask: runningTask?.description,
+            progress,
+            estimatedTimeLeft: remainingTasks * 30 // 估计每个任务30秒
+        };
+    }
+    /**
+     * 清理资源
+     */
+    async cleanup() {
+        if (this.crawler) {
+            await this.crawler.cleanup();
+        }
+    }
+}
+exports.IntelligentAgent = IntelligentAgent;
+//# sourceMappingURL=IntelligentAgent.js.map

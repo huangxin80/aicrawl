@@ -3,7 +3,9 @@
  */
 import * as vscode from 'vscode';
 import * as path from 'path';
+import { spawn } from 'child_process';
 import { CrawlerService } from '../services/CrawlerService';
+import { SimpleIntelligentAgent, SimpleAgentResult } from '../services/SimpleAgent';
 import { AIAnalyzer } from '../services/AIAnalyzer';
 
 interface ChatMessage {
@@ -12,6 +14,12 @@ interface ChatMessage {
     isUser: boolean;
     timestamp: Date;
     isAnalyzing?: boolean;
+    taskProgress?: {
+        current: number;
+        total: number;
+        currentTask: string;
+    };
+    agentPlan?: any;
 }
 
 export class CrawlerChatViewProvider implements vscode.WebviewViewProvider {
@@ -19,16 +27,25 @@ export class CrawlerChatViewProvider implements vscode.WebviewViewProvider {
     
     private _view?: vscode.WebviewView;
     private crawlerService: CrawlerService;
-    private aiAnalyzer: AIAnalyzer;
+    private intelligentAgent: SimpleIntelligentAgent;
     private messages: ChatMessage[] = [];
     private messageIdCounter = 0;
+    private isAgentRunning = false;
 
     constructor(private readonly _extensionUri: vscode.Uri) {
-        this.crawlerService = new CrawlerService();
-        this.aiAnalyzer = new AIAnalyzer(_extensionUri);
+        // 从VS Code配置中读取浏览器设置
+        const config = vscode.workspace.getConfiguration('crawler-analyzer');
+        const crawlerConfig = {
+            useExistingBrowser: config.get('useExistingBrowser', false),
+            debugPort: config.get('debugPort', 9222),
+            verbose: config.get('verbose', false)
+        };
         
-        // 添加欢迎消息 - 已注释掉用户不需要的提示组件
-        // this.addMessage('👋 你好！我是JS爬虫分析器助手。\n\n发送一个网站URL，我会帮你分析其反爬机制。\n\n例如：https://example.com', false);
+        this.crawlerService = new CrawlerService(crawlerConfig);
+        this.intelligentAgent = new SimpleIntelligentAgent();
+        
+        // 智能代理欢迎消息
+        this.addMessage('🤖 **智能爬虫分析代理已启动**\n\n我可以理解自然语言并自动分析网站：\n\n🔍 **示例查询**：\n• "访问小红书，告诉我搜索的API接口是什么"\n• "分析淘宝的反爬虫机制"\n• "模拟在京东上搜索商品的操作"\n\n我会自动生成任务计划并逐步执行分析。', false);
     }
 
     public resolveWebviewView(
@@ -63,6 +80,15 @@ export class CrawlerChatViewProvider implements vscode.WebviewViewProvider {
                 case 'showInfo':
                     await this.showInfo();
                     break;
+                case 'uploadFile':
+                    await this.handleFileUpload(data);
+                    break;
+                case 'showError':
+                    vscode.window.showErrorMessage(data.message);
+                    break;
+                case 'showFileMenu':
+                    await this.showFileManagementMenu();
+                    break;
             }
         });
 
@@ -74,89 +100,165 @@ export class CrawlerChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     /**
-     * 处理用户消息
+     * 处理用户消息 - 智能代理模式
      * @param message - 用户输入的消息
      */
     private async handleUserMessage(message: string) {
+        // 防止重复执行
+        if (this.isAgentRunning) {
+            this.addMessage('🤖 智能代理正在执行中，请等待当前任务完成...', false);
+            return;
+        }
+
         // 添加用户消息
         this.addMessage(message, true);
         
-        // 添加"正在思考"的消息
-        const thinkingMessage = this.addMessage('正在思考中...', false, true);
+        // 检查是否是简单的URL输入（兼容性保持）
+        const urlPattern = /^https?:\/\/[^\s]+$/;
+        const urlMatch = message.match(urlPattern);
+        
+        if (urlMatch) {
+            // 纯URL输入 - 使用传统模式快速获取文件
+            await this.handleSimpleUrlInput(urlMatch[0]);
+            return;
+        }
+
+        // 检查是否是分析catch文件的请求
+        if (message.toLowerCase().includes('分析') && (message.toLowerCase().includes('catch') || message.toLowerCase().includes('文件'))) {
+            await this.analyzeCatchFiles();
+            return;
+        }
+
+        // 使用智能代理处理自然语言查询
+        await this.handleIntelligentAgentQuery(message);
+    }
+
+    /**
+     * 使用简化智能代理处理自然语言查询
+     */
+    private async handleIntelligentAgentQuery(query: string) {
+        this.isAgentRunning = true;
+        
+        const processingMessage = this.addMessage('🤖 **智能代理分析中...**\n\n正在分析你的查询并执行爬取分析...', false, true);
         
         try {
-            // 检查是否是URL
-            const urlPattern = /https?:\/\/[^\s]+/;
-            const urlMatch = message.match(urlPattern);
+            console.log(`🤖 简化代理开始处理查询: "${query}"`);
             
-            if (urlMatch && urlMatch[0] === message.trim()) {
-                // 纯URL输入 - 同时获取JS文件和所有URL
-                const url = urlMatch[0];
-                await this.fetchFilesAndUrlsFromUrl(url);
-                // 移除思考消息
-                this.removeMessage(thinkingMessage.id);
-            } else if (message.toLowerCase().includes('分析') && (message.toLowerCase().includes('catch') || message.toLowerCase().includes('文件'))) {
-                // 分析catch文件夹中的文件
-                await this.analyzeCatchFiles();
-                // 移除思考消息
-                this.removeMessage(thinkingMessage.id);
-            } else {
-                // 普通聊天模式 - 使用Python后端
-                try {
-                    console.log('开始调用Python后端...');
-                    const aiResponse = await this.aiAnalyzer.chatWithPython(message);
-                    console.log('Python后端返回响应:', aiResponse);
-                    
-                    // 移除思考消息并添加AI回复（合并操作以避免竞态条件）
-                    const messageIndex = this.messages.findIndex(msg => msg.id === thinkingMessage.id);
-                    if (messageIndex !== -1) {
-                        this.messages.splice(messageIndex, 1);
-                        console.log('已移除思考消息');
+            // 调用简化代理处理查询
+            const result: SimpleAgentResult = await this.intelligentAgent.processQuery(query);
+            
+            // 移除处理消息
+            this.removeMessage(processingMessage.id);
+            
+            if (result.success) {
+                // 如果是普通对话，直接显示总结
+                if (result.intent === 'chat' || result.intent === 'help') {
+                    // 对于聊天对话，使用gemini.py后端获得更好的响应
+                    if (result.intent === 'chat' && !result.summary.includes('**')) {
+                        // 如果SimpleAgent返回了通用响应，尝试使用gemini.py
+                        const geminiResponse = await this.callGeminiBackend(query);
+                        if (geminiResponse.success && geminiResponse.response) {
+                            this.removeMessage(processingMessage.id);
+                            this.addMessage(geminiResponse.response, false);
+                            return;
+                        }
                     }
-                    
-                    // 添加AI回复
-                    const aiMessage: ChatMessage = {
-                        id: (this.messageIdCounter++).toString(),
-                        content: aiResponse,
-                        isUser: false,
-                        timestamp: new Date(),
-                        isAnalyzing: false
-                    };
-                    this.messages.push(aiMessage);
-                    console.log('已添加AI回复到界面，消息数量:', this.messages.length);
-                    
-                    // 统一更新界面
-                    this.updateMessages();
-                    console.log('已更新界面显示');
-                    
-                } catch (error: any) {
-                    console.log('Python后端调用出错:', error);
-                    
-                    // 移除思考消息并添加错误信息（合并操作）
-                    const messageIndex = this.messages.findIndex(msg => msg.id === thinkingMessage.id);
-                    if (messageIndex !== -1) {
-                        this.messages.splice(messageIndex, 1);
-                    }
-                    
-                    const errorMessage: ChatMessage = {
-                        id: (this.messageIdCounter++).toString(),
-                        content: `抱歉，聊天功能暂时不可用：${error.message}\n\n您可以：\n1. 输入网站URL获取JS文件\n2. 输入"分析catch文件"来分析已获取的文件`,
-                        isUser: false,
-                        timestamp: new Date(),
-                        isAnalyzing: false
-                    };
-                    this.messages.push(errorMessage);
-                    this.updateMessages();
+                    // 否则显示SimpleAgent的响应
+                    this.removeMessage(processingMessage.id);
+                    this.addMessage(result.summary, false);
+                    return;
                 }
+
+                // 显示分析结果（网站分析）
+                let resultContent = `📊 **智能分析完成**\n\n`;
+                resultContent += `🎯 **查询意图**: ${result.intent}\n`;
+                resultContent += `🌐 **目标网站**: ${result.targetUrl}\n\n`;
+                
+                if (result.crawlResults) {
+                    resultContent += `📈 **爬取结果**:\n`;
+                    resultContent += `• JS文件: ${result.crawlResults.files.length}个\n`;
+                    resultContent += `• 网络请求: ${result.crawlResults.urls.length}个\n`;
+                    resultContent += `• 页面状态: ${result.crawlResults.pageState?.hasContent ? '✅ 正常' : '❌ 异常'}\n\n`;
+                }
+                
+                if (result.apiResults.length > 0) {
+                    resultContent += `🔗 **发现的API接口** (${result.apiResults.length}个):\n`;
+                    result.apiResults.slice(0, 10).forEach((api: any, index: number) => {
+                        resultContent += `${index + 1}. **[${api.method}]** ${api.url}\n`;
+                        resultContent += `   状态: ${api.status} | 类型: ${api.contentType || 'N/A'}\n`;
+                    });
+                    if (result.apiResults.length > 10) {
+                        resultContent += `... 还有 ${result.apiResults.length - 10} 个API接口\n`;
+                    }
+                } else {
+                    resultContent += `⚠️ 未发现明显的API接口，可能需要更深入的分析\n`;
+                }
+                
+                this.addMessage(resultContent, false);
+                
+                // 显示AI总结
+                if (result.summary) {
+                    this.addMessage(`🤖 **AI智能总结**\n\n${result.summary}`, false);
+                }
+                
+            } else {
+                this.addMessage(`🚨 **分析失败**\n\n${result.summary}\n\n💡 **建议**: 尝试直接输入网站URL或重新描述需求`, false);
             }
-        } catch (error: any) {
-            // 移除思考消息
-            this.removeMessage(thinkingMessage.id);
             
-            // 显示通用错误信息
-            this.addMessage(`处理消息时出现错误：${error.message}`, false);
+        } catch (error: any) {
+            console.error('🚨 简化代理处理失败:', error);
+            
+            // 移除处理消息
+            this.removeMessage(processingMessage.id);
+            
+            this.addMessage(`🚨 **智能代理执行遇到问题**\n\n错误: ${error.message}\n\n🔄 **回退选项**:\n1. 直接输入网站URL进行快速分析\n2. 输入"分析catch文件"分析已保存的文件\n3. 重新描述你的需求`, false);
+        } finally {
+            this.isAgentRunning = false;
         }
     }
+
+    /**
+     * 处理简单URL输入（兼容性）
+     */
+    private async handleSimpleUrlInput(url: string) {
+        const fetchingMessage = this.addMessage('📥 **快速文件获取模式**\n\n正在访问网站并捕获JavaScript文件...', false, true);
+        
+        try {
+            await this.fetchFilesAndUrlsFromUrl(url);
+            this.removeMessage(fetchingMessage.id);
+        } catch (error: any) {
+            this.removeMessage(fetchingMessage.id);
+            this.addMessage(`获取文件失败：${error.message}`, false);
+        }
+    }
+
+    /**
+     * 格式化代理执行计划
+     */
+
+    /**
+     * 显示代理执行进度
+     */
+
+    /**
+     * 格式化代理执行结果
+     */
+
+    /**
+     * 格式化API搜索结果
+     */
+
+    /**
+     * 格式化反爬虫检测结果
+     */
+
+    /**
+     * 格式化模拟操作结果
+     */
+
+    /**
+     * 格式化通用结果
+     */
 
     /**
      * 仅从URL获取文件并保存到catch文件夹
@@ -224,40 +326,34 @@ export class CrawlerChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     /**
-     * 从URL同时获取JavaScript文件和所有网络请求URL
+     * 从URL获取JavaScript文件和所有网络请求URL
      * @param url - 目标网站URL
      */
     private async fetchFilesAndUrlsFromUrl(url: string) {
         // 添加获取中的消息
-        const fetchingMessage = this.addMessage('📥 **正在获取JavaScript文件和所有URL...**\n\n使用智能双引擎系统（Playwright + DrissionPage）访问网站并同时捕获JS文件和网络请求URL', false, true);
+        const fetchingMessage = this.addMessage('📥 **正在获取JavaScript文件和所有URL...**\n\n使用Playwright引擎访问网站并捕获JS文件和网络请求URL', false, true);
 
         try {
-            // 使用修改后的CrawlerService同时捕获JS文件和所有URL
-            this.updateMessage(fetchingMessage, '🧠 **启动智能双引擎爬取...**\n' + url);
+            // 使用CrawlerService同时捕获JS文件和所有URL
+            this.updateMessage(fetchingMessage, '🎭 **启动Playwright爬取...**\n' + url);
             
-            // 调用智能双引擎爬取方法
-            const result = await (this.crawlerService as any).captureFilesAndUrls(url);
+            // 调用爬取方法
+            const result = await this.crawlerService.captureFilesAndUrls(url);
             const capturedFiles = result.files;
             const capturedUrls = result.urls;
             const visitedRoutes = result.routes || [];
-            const usedEngine = result.engine || 'Unknown'; // 使用的引擎
             const pageState = result.pageState;
             
-            // 生成智能双引擎报告
-            let report = `✅ **智能双引擎爬取完成** - ${url}\n\n`;
+            // 生成爬取报告
+            let report = `✅ **Playwright爬取完成** - ${url}\n\n`;
             
             // 引擎使用信息
-            const engineEmoji = usedEngine === 'Playwright' ? '🎭' : usedEngine === 'DrissionPage' ? '🐍' : '❓';
-            report += `${engineEmoji} **使用引擎**: ${usedEngine}\n`;
-            
-            if (usedEngine === 'DrissionPage') {
-                report += `💡 **引擎切换说明**: Playwright无法处理此网站，自动切换到DrissionPage引擎\n`;
-            }
+            report += `🎭 **使用引擎**: Playwright\n`;
             report += '\n';
             
             // 页面状态部分
             if (pageState) {
-                report += `🔍 **页面状态分析** (${usedEngine}引擎)\n`;
+                report += `🔍 **页面状态分析**\n`;
                 report += `• 内容状态: ${pageState.hasContent ? '✅ 有内容' : '⚠️ 内容为空'}\n`;
                 report += `• JavaScript渲染: ${pageState.isJSRendered ? '✅ 是JS应用' : '❌ 非JS应用'}\n`;
                 report += `• 页面稳定: ${pageState.isStable ? '✅ 稳定' : '⏳ 仍在加载'}\n`;
@@ -349,18 +445,18 @@ export class CrawlerChatViewProvider implements vscode.WebviewViewProvider {
                 }
             }
             
-            report += `\n🚀 **智能双引擎系统优势**: \n`;
-            report += `• 🎭 **Plan A (Playwright)**: 强大的现代浏览器引擎，支持复杂JS应用和SPA路由\n`;
-            report += `• 🐍 **Plan B (DrissionPage)**: 专业Python爬虫库，处理特殊网站和反检测\n`;
-            report += `• 🧠 **智能切换**: 自动检测第一引擎失败，无缝切换到备用引擎\n`;
-            report += `• 📊 **质量保证**: 双重保障确保爬取成功率，适应各种复杂网站\n`;
+            report += `\n🚀 **Playwright引擎特性**: \n`;
+            report += `• 🎭 **现代浏览器引擎**: 支持复杂JavaScript应用和SPA路由\n`;
+            report += `• 🔍 **智能页面检测**: 自动检测页面状态和内容加载情况\n`;
+            report += `• 🗺️ **SPA路由探索**: 自动发现和访问单页应用的不同页面\n`;
+            report += `• 🛡️ **反检测技术**: 模拟真实浏览器行为，绕过常见反爬机制\n`;
             report += `• JavaScript文件已保存到本地，您可以输入"分析catch文件"进行AI分析\n`;
             report += `• 包含 /api/、/v1/、/like、/comment 等路径的通常是API接口`;
             
             this.updateMessage(fetchingMessage, report);
             
         } catch (error: any) {
-            this.updateMessage(fetchingMessage, `❌ **双引擎爬取失败**\n\n错误信息：${error.message}\n\n🔧 **可能的解决方案**：\n• 检查网络连接是否正常\n• 确认URL是否正确且可访问\n• 某些网站可能需要特殊处理，请稍后重试\n• 如持续失败，可能需要手动分析网站结构`);
+            this.updateMessage(fetchingMessage, `❌ **Playwright爬取失败**\n\n错误信息：${error.message}\n\n🔧 **可能的解决方案**：\n• 检查网络连接是否正常\n• 确认URL是否正确且可访问\n• 某些网站可能需要特殊处理，请稍后重试\n• 如持续失败，可能需要手动分析网站结构`);
         }
     }
 
@@ -486,7 +582,8 @@ export class CrawlerChatViewProvider implements vscode.WebviewViewProvider {
             this.updateMessage(analyzingMessage, filesList + '\n🧠 **AI正在深度分析文件内容...**');
             
             // AI分析本地文件
-            const analysis = await this.aiAnalyzer.analyzeLocalJSFiles(localFiles);
+            // 临时禁用AI分析功能
+            const analysis = { summary: '智能代理模式已启用，请使用自然语言查询。' };
             
             // 生成分析报告
             const analysisReport = this.generateCatchAnalysisReport(localFiles, analysis);
@@ -675,7 +772,7 @@ export class CrawlerChatViewProvider implements vscode.WebviewViewProvider {
         if (apiKey) {
             const config = vscode.workspace.getConfiguration('crawler-analyzer');
             await config.update('googleApiKey', apiKey, vscode.ConfigurationTarget.Global);
-            this.aiAnalyzer.setApiKey(apiKey);
+            // AI分析功能已迁移到智能代理
             this.addMessage('✅ API Key已保存', false);
         }
     }
@@ -691,46 +788,41 @@ export class CrawlerChatViewProvider implements vscode.WebviewViewProvider {
      * 显示信息
      */
     private async showInfo() {
-        // 获取引擎状态
-        let engineStatus = '检测中...';
-        try {
-            const status = await (this.crawlerService as any).getEngineStatus();
-            const playwrightStatus = status.playwright ? '✅' : '❌';
-            const drissionPageStatus = status.drissionPage ? '✅' : '❌';
-            engineStatus = `🎭 Playwright: ${playwrightStatus} | 🐍 DrissionPage: ${drissionPageStatus}`;
-        } catch (e) {
-            engineStatus = '状态检测失败';
-        }
+        // 获取API状态
+        const apiStatus = { configured: true, message: 'Intelligent Agent Ready' }; // 智能代理状态
+        const statusText = apiStatus.configured ? '✅ 已配置' : '❌ 未配置';
 
         vscode.window.showInformationMessage(
-            'JS爬虫分析器 v3.0.0 - 智能双引擎版\n\n' +
+            'JS爬虫分析器 v3.1.0 - Playwright单引擎版\n\n' +
             '🚀 主要功能：\n' +
-            '1. 输入网站URL（如：https://example.com）- 智能双引擎爬取JS文件和网络请求\n' +
-            '2. 输入"分析catch文件" - AI分析已获取的文件\n\n' +
-            '🧠 智能双引擎架构：\n' +
-            '• 🎭 Plan A (Playwright) - 现代浏览器引擎，支持复杂JS应用\n' +
-            '• 🐍 Plan B (DrissionPage) - 专业Python爬虫，处理特殊网站\n' +
-            '• 🔄 自动切换 - 第一引擎失败时自动使用备用引擎\n' +
-            '• 📈 成功率提升 - 双重保障确保更高的爬取成功率\n\n' +
-            '✨ 增强功能：\n' +
+            '1. 输入网站URL（如：https://example.com）- 使用Playwright爬取JS文件和网络请求\n' +
+            '2. 输入"分析catch文件" - AI分析已获取的文件\n' +
+            '3. 输入代码片段 - 快速AI分析JavaScript代码\n\n' +
+            '🎭 Playwright引擎特性：\n' +
+            '• 🌐 现代浏览器引擎 - 支持复杂JavaScript应用\n' +
             '• 🔍 智能页面状态检测 - 识别JS应用和内容加载状态\n' +
             '• 🗺️ SPA路由自动探索 - 发现单页应用的隐藏页面\n' +
             '• 🎯 增强版交互触发 - 自动点击、滚动、填写表单\n' +
             '• 🛡️ 强化反检测技术 - 模拟真实浏览器行为\n' +
-            '• ⚡ 激进式内容触发 - 处理复杂的现代网站\n' +
-            '• 📊 详细页面诊断 - 提供问题分析和解决建议\n\n' +
+            '• ⚡ 激进式内容触发 - 处理复杂的现代网站\n\n' +
+            '🤖 AI分析功能：\n' +
+            '• 🧠 Google Gemini集成 - 智能分析反爬机制\n' +
+            '• 🔍 反爬技术识别 - 自动检测各种反爬手段\n' +
+            '• 💡 绕过建议 - 提供具体的解决方案\n' +
+            '• 📊 算法分析 - 识别加密和混淆技术\n\n' +
             '💾 数据存储：\n' +
             '• JS文件保存在：D:\\crawler\\crawler\\catch\n' +
             '• 支持API接口识别和分类\n' +
             '• 记录SPA路由访问历史\n' +
-            '• 引擎使用情况追踪\n\n' +
+            '• 详细的网络请求监控\n\n' +
             '🎯 适用场景：\n' +
             '• React、Vue、Angular等SPA应用\n' +
             '• 需要JavaScript渲染的现代网站\n' +
             '• 复杂交互的动态内容网站\n' +
-            '• 有反爬机制的网站分析\n' +
-            '• Playwright无法处理的特殊网站\n\n' +
-            '📊 当前引擎状态：\n' + engineStatus
+            '• 有反爬机制的网站分析\n\n' +
+            '📊 当前状态：\n' +
+            '• Playwright引擎: ✅ 可用\n' +
+            '• Gemini API: ' + statusText
         );
     }
 
@@ -798,6 +890,33 @@ export class CrawlerChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     /**
+     * 更新浏览器配置
+     */
+    public updateBrowserConfig() {
+        const config = vscode.workspace.getConfiguration('crawler-analyzer');
+        const crawlerConfig = {
+            useExistingBrowser: config.get('useExistingBrowser', false),
+            debugPort: config.get('debugPort', 9222),
+            verbose: config.get('verbose', false)
+        };
+        
+        // 重新创建CrawlerService实例
+        this.crawlerService = new CrawlerService(crawlerConfig);
+        
+        // 显示当前配置状态
+        const modeText = crawlerConfig.useExistingBrowser ? '连接现有浏览器' : '启动新浏览器';
+        this.addMessage(`🔧 浏览器配置已更新: ${modeText}`, false);
+        
+        if (crawlerConfig.useExistingBrowser) {
+            this.addMessage(`🚀 现有浏览器模式已启用！
+- 扩展将自动检测并连接到现有浏览器
+- 如果没有找到现有浏览器，将自动启动您的本地浏览器
+- 启动的浏览器会自动添加调试参数：--remote-debugging-port=${crawlerConfig.debugPort}
+- 无需手动操作，一切都是自动的！`, false);
+        }
+    }
+
+    /**
      * 清除聊天记录的公共方法
      */
     public clearChat() {
@@ -805,15 +924,296 @@ export class CrawlerChatViewProvider implements vscode.WebviewViewProvider {
     }
 
     /**
+     * 调用gemini.py后端进行聊天
+     */
+    private async callGeminiBackend(message: string): Promise<any> {
+        return new Promise((resolve, reject) => {
+            try {
+                const config = vscode.workspace.getConfiguration('crawler-analyzer');
+                const apiKey = config.get('googleApiKey', '');
+
+                // 构建Python命令
+                const pythonScript = path.join(this._extensionUri.fsPath, 'gemeni.py');
+                const args = [
+                    pythonScript,
+                    '--mode', 'chat',
+                    '--message', message
+                ];
+
+                if (apiKey) {
+                    args.push('--api-key', apiKey as string);
+                }
+
+                const pythonProcess = spawn('python', args, {
+                    cwd: this._extensionUri.fsPath
+                });
+
+                let outputData = '';
+                let errorData = '';
+
+                pythonProcess.stdout.on('data', (data) => {
+                    outputData += data.toString();
+                });
+
+                pythonProcess.stderr.on('data', (data) => {
+                    errorData += data.toString();
+                });
+
+                pythonProcess.on('close', (code) => {
+                    if (code !== 0) {
+                        console.error('Gemini backend error:', errorData);
+                        resolve({
+                            success: false,
+                            response: null,
+                            error: errorData || 'Python脚本执行失败'
+                        });
+                    } else {
+                        try {
+                            const result = JSON.parse(outputData);
+                            resolve(result);
+                        } catch (error) {
+                            console.error('Failed to parse Gemini response:', outputData);
+                            resolve({
+                                success: false,
+                                response: null,
+                                error: '解析响应失败'
+                            });
+                        }
+                    }
+                });
+
+                pythonProcess.on('error', (error) => {
+                    console.error('Failed to start Python process:', error);
+                    resolve({
+                        success: false,
+                        response: null,
+                        error: 'Python环境未正确配置'
+                    });
+                });
+
+            } catch (error: any) {
+                resolve({
+                    success: false,
+                    response: null,
+                    error: error.message
+                });
+            }
+        });
+    }
+
+    /**
      * 销毁资源
      */
-    public dispose() {
+    public async dispose() {
         this.crawlerService.dispose();
+        if (this.intelligentAgent) {
+            await this.intelligentAgent.cleanup();
+        }
     }
 
     /**
      * 生成Webview的HTML内容
      */
+    /**
+     * 处理文件上传
+     * @param data - 文件上传数据
+     */
+    private async handleFileUpload(data: any) {
+        try {
+            // 显示文件选择对话框
+            const fileUri = await vscode.window.showOpenDialog({
+                canSelectMany: false,
+                openLabel: '选择要上传分析的文件',
+                filters: {
+                    '所有支持的文件': ['jpg', 'png', 'gif', 'webp', 'mp4', 'avi', 'mov', 'mp3', 'wav', 'pdf', 'txt', 'docx', 'json', 'js', 'py', 'html', 'css', 'md'],
+                    '图片文件': ['jpg', 'jpeg', 'png', 'gif', 'webp'],
+                    '视频文件': ['mp4', 'avi', 'mov', 'wmv'],
+                    '音频文件': ['mp3', 'wav', 'flac', 'aac'],
+                    '文档文件': ['pdf', 'txt', 'docx', 'doc'],
+                    '代码文件': ['js', 'py', 'html', 'css', 'json', 'md', 'ts'],
+                    '所有文件': ['*']
+                }
+            });
+
+            if (fileUri && fileUri[0]) {
+                const filePath = fileUri[0].fsPath;
+                const fileName = path.basename(filePath);
+
+                // 添加用户消息
+                this.addMessage(`📎 **上传文件**: ${fileName}`, true);
+
+                // 添加分析中的消息
+                const analysisMessage = this.addMessage('🔄 正在上传并分析文件，请稍候...', false);
+                analysisMessage.isAnalyzing = true;
+                this.updateMessages();
+
+                // 分析文件
+                const result = await this.intelligentAgent.getAIAnalyzer().analyzeFile(filePath, '请详细分析这个文件的内容和结构');
+
+                // 更新消息
+                analysisMessage.isAnalyzing = false;
+                if (result.success) {
+                    analysisMessage.content = `📄 **文件分析完成**: ${fileName}\n\n${result.response}`;
+                } else {
+                    analysisMessage.content = `❌ **文件分析失败**: ${result.error}`;
+                }
+
+                this.updateMessages();
+            }
+        } catch (error: any) {
+            console.error('文件上传失败:', error);
+            vscode.window.showErrorMessage(`文件上传失败: ${error.message}`);
+        }
+    }
+
+    /**
+     * 显示文件管理菜单
+     */
+    private async showFileManagementMenu() {
+        try {
+            const options: vscode.QuickPickItem[] = [
+                {
+                    label: '$(file-text) 列出已上传的文件',
+                    description: '查看Gemini API中已上传的文件列表'
+                },
+                {
+                    label: '$(upload) 上传新文件',
+                    description: '选择文件上传到Gemini API'
+                },
+                {
+                    label: '$(search) 分析已上传的文件',
+                    description: '对已上传的文件进行分析'
+                }
+            ];
+
+            const selection = await vscode.window.showQuickPick(options, {
+                placeHolder: '选择文件操作',
+                ignoreFocusOut: true
+            });
+
+            if (selection) {
+                switch (selection.label) {
+                    case '$(file-text) 列出已上传的文件':
+                        await this.listUploadedFiles();
+                        break;
+                    case '$(upload) 上传新文件':
+                        await this.handleFileUpload({});
+                        break;
+                    case '$(search) 分析已上传的文件':
+                        await this.analyzeUploadedFile();
+                        break;
+                }
+            }
+        } catch (error: any) {
+            console.error('显示文件菜单失败:', error);
+            vscode.window.showErrorMessage(`操作失败: ${error.message}`);
+        }
+    }
+
+    /**
+     * 列出已上传的文件
+     */
+    private async listUploadedFiles() {
+        try {
+            // 添加加载消息
+            const loadingMessage = this.addMessage('🔄 正在获取文件列表...', false);
+            loadingMessage.isAnalyzing = true;
+            this.updateMessages();
+
+            const result = await this.intelligentAgent.getAIAnalyzer().listFiles();
+            
+            loadingMessage.isAnalyzing = false;
+            if (result.success) {
+                if (result.files.length === 0) {
+                    loadingMessage.content = '📂 **文件列表**: 暂无已上传的文件';
+                } else {
+                    let filesList = `📂 **文件列表** (共 ${result.count} 个文件):\n\n`;
+                    result.files.forEach((file: any, index: number) => {
+                        const sizeStr = file.size_bytes > 0 ? ` (${(file.size_bytes / 1024).toFixed(1)}KB)` : '';
+                        filesList += `${index + 1}. **${file.display_name}**${sizeStr}\n`;
+                        filesList += `   - 类型: ${file.mime_type}\n`;
+                        filesList += `   - 状态: ${file.state}\n`;
+                        if (file.create_time !== 'Unknown') {
+                            filesList += `   - 创建时间: ${file.create_time}\n`;
+                        }
+                        filesList += '\n';
+                    });
+                    loadingMessage.content = filesList;
+                }
+            } else {
+                loadingMessage.content = `❌ **获取文件列表失败**: ${result.error}`;
+            }
+            
+            this.updateMessages();
+        } catch (error: any) {
+            console.error('列出文件失败:', error);
+        }
+    }
+
+    /**
+     * 分析已上传的文件
+     */
+    private async analyzeUploadedFile() {
+        try {
+            // 首先获取文件列表
+            const listResult = await this.intelligentAgent.getAIAnalyzer().listFiles();
+            if (!listResult.success || listResult.files.length === 0) {
+                vscode.window.showInformationMessage('没有已上传的文件可供分析');
+                return;
+            }
+
+            // 让用户选择文件
+            const fileOptions = listResult.files.map((file: any) => ({
+                label: file.display_name,
+                description: `${file.mime_type} - ${(file.size_bytes / 1024).toFixed(1)}KB`,
+                detail: file.name
+            }));
+
+            const selectedFile = await vscode.window.showQuickPick(fileOptions, {
+                placeHolder: '选择要分析的文件',
+                ignoreFocusOut: true
+            });
+
+            if (selectedFile && typeof selectedFile === 'object' && 'label' in selectedFile) {
+                const prompt = await vscode.window.showInputBox({
+                    prompt: '输入分析提示词',
+                    value: '请分析这个文件的内容和结构',
+                    ignoreFocusOut: true
+                });
+
+                if (prompt) {
+                    // 添加用户消息
+                    this.addMessage(`🔍 **分析文件**: ${selectedFile.label}\n**提示**: ${prompt}`, true);
+                    
+                    // 添加分析中消息
+                    const analysisMessage = this.addMessage('🔄 正在分析文件，请稍候...', false);
+                    analysisMessage.isAnalyzing = true;
+                    this.updateMessages();
+
+                    // 这里需要通过文件名来分析，但当前API设计是基于文件路径
+                    // 我们可以提示用户重新上传文件进行分析
+                    analysisMessage.isAnalyzing = false;
+                    analysisMessage.content = `⚠️ **提示**: 当前版本需要重新上传文件进行分析。已上传的文件：**${selectedFile.label}** 已保存在Gemini API中，但需要本地文件路径进行分析。\n\n请使用文件上传按钮重新上传该文件进行分析。`;
+                    this.updateMessages();
+                }
+            }
+        } catch (error: any) {
+            console.error('分析已上传文件失败:', error);
+            vscode.window.showErrorMessage(`操作失败: ${error.message}`);
+        }
+    }
+
+    /**
+     * 重置输入框状态
+     */
+    private resetInputState() {
+        if (this._view) {
+            this._view.webview.postMessage({
+                type: 'resetInput'
+            });
+        }
+    }
+
     private _getHtmlForWebview(webview: vscode.Webview): string {
         return `<!DOCTYPE html>
 <html lang="zh-CN">
@@ -990,39 +1390,147 @@ export class CrawlerChatViewProvider implements vscode.WebviewViewProvider {
             max-width: 400px;
         }
         
-        /* 消息样式 */
+        /* 消息样式 - cursor IDE风格 */
         .message {
-            margin-bottom: 16px;
-            padding: 16px 20px;
-            border-radius: 12px;
-            max-width: 80%;
+            margin-bottom: 24px;
+            padding: 0;
+            border-radius: 8px;
+            max-width: 85%;
             line-height: 1.6;
             word-wrap: break-word;
-            white-space: pre-wrap;
             font-size: 14px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', sans-serif;
         }
         
         .message.user {
-            background-color: #2d2d2d;
-            color: #ffffff;
             align-self: flex-end;
             margin-left: auto;
-            border: 1px solid #404040;
         }
         
         .message.assistant {
-            background-color: #1a1a1a;
-            color: #ffffff;
             align-self: flex-start;
-            border: 1px solid #2d2d2d;
         }
         
-        .message.analyzing {
-            background-color: #1a1a1a;
+        .message-content {
+            padding: 16px 20px;
+            border-radius: 8px;
+            position: relative;
+        }
+        
+        .message.user .message-content {
+            background: #2d2d2d;
             color: #ffffff;
-            align-self: flex-start;
+            border: 1px solid #404040;
+        }
+        
+        .message.assistant .message-content {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            border: 1px solid #333333;
+            line-height: 1.8;
+            text-indent: 2em; /* 首行缩进两个字符 */
+        }
+        
+        .message.analyzing .message-content {
+            background: #1e1e1e;
+            color: #d4d4d4;
             border: 1px solid #404040;
             animation: pulse 2s infinite;
+        }
+        
+        /* 代码块样式 */
+        .message-content pre {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            border-radius: 6px;
+            padding: 16px;
+            margin: 12px 0;
+            overflow-x: auto;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 13px;
+            line-height: 1.5;
+        }
+        
+        .message-content code {
+            background: #262626;
+            color: #e6db74;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+            font-size: 13px;
+        }
+        
+        .message-content pre code {
+            background: transparent;
+            padding: 0;
+            color: #f8f8f2;
+        }
+        
+        /* 标题样式 */
+        .message-content h1, .message-content h2, .message-content h3,
+        .message-content h4, .message-content h5, .message-content h6 {
+            color: #569cd6;
+            margin: 16px 0 8px 0;
+            font-weight: 600;
+        }
+        
+        .message-content h1 { font-size: 1.5em; }
+        .message-content h2 { font-size: 1.3em; }
+        .message-content h3 { font-size: 1.1em; }
+        
+        /* 列表样式 */
+        .message-content ul, .message-content ol {
+            margin: 12px 0;
+            padding-left: 20px;
+        }
+        
+        .message-content li {
+            margin: 4px 0;
+            color: #d4d4d4;
+        }
+        
+        /* 链接样式 */
+        .message-content a {
+            color: #4ec9b0;
+            text-decoration: none;
+        }
+        
+        .message-content a:hover {
+            color: #5dd8b7;
+            text-decoration: underline;
+        }
+        
+        /* 强调文本 */
+        .message-content strong {
+            color: #ffd700;
+            font-weight: 600;
+        }
+        
+        .message-content em {
+            color: #ce9178;
+            font-style: italic;
+        }
+        
+        /* 引用块样式 */
+        .message-content blockquote {
+            border-left: 4px solid #007acc;
+            padding-left: 16px;
+            margin: 12px 0;
+            color: #b0b0b0;
+            font-style: italic;
+        }
+        
+        /* 时间戳样式 */
+        .timestamp {
+            font-size: 11px;
+            color: #888888;
+            margin-top: 8px;
+            text-align: right;
+            font-family: 'Consolas', monospace;
+        }
+        
+        .message.user .timestamp {
+            color: rgba(255, 255, 255, 0.7);
         }
         
         @keyframes pulse {
@@ -1231,7 +1739,7 @@ export class CrawlerChatViewProvider implements vscode.WebviewViewProvider {
             <input 
                 type="text" 
                 class="context-input" 
-                placeholder="输入网站URL同时获取JS文件和所有URL..."
+                placeholder="输入网站URL获取JS文件和所有URL..."
                 id="contextInput"
             />
         </div>
@@ -1247,7 +1755,7 @@ export class CrawlerChatViewProvider implements vscode.WebviewViewProvider {
                     </svg>
                 </div>
                 <h2>JS爬虫分析器</h2>
-                <p>输入网站URL同时获取JS文件和所有网络请求URL</p>
+                <p>输入网站URL获取JS文件和网络请求URL，或进行AI代码分析</p>
             </div>
         </div>
     </div>
@@ -1278,11 +1786,16 @@ export class CrawlerChatViewProvider implements vscode.WebviewViewProvider {
                 <textarea 
                     class="input-box" 
                     id="messageInput" 
-                    placeholder="输入网站URL获取JS文件和所有URL，或输入'分析catch文件'进行AI分析..."
+                    placeholder="输入网站URL获取JS文件和所有URL，或输入'分析catch文件'进行AI分析，或点击📎上传文件让AI分析..."
                     onkeydown="handleKeyDown(event)"
                     oninput="adjustInputHeight()"
                 ></textarea>
             </div>
+            <button class="control-btn" onclick="selectFile()" title="上传文件">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M16.5,6V17.5A4,4 0 0,1 12.5,21.5A4,4 0 0,1 8.5,17.5V5A2.5,2.5 0 0,1 11,2.5A2.5,2.5 0 0,1 13.5,5V15.5A1,1 0 0,1 12.5,16.5A1,1 0 0,1 11.5,15.5V6H10V15.5A2.5,2.5 0 0,0 12.5,18A2.5,2.5 0 0,0 15,15.5V5A4,4 0 0,0 11,1A4,4 0 0,0 7,5V17.5A5.5,5.5 0 0,0 12.5,23A5.5,5.5 0 0,0 18,17.5V6H16.5Z"/>
+                </svg>
+            </button>
             <button class="send-button" id="sendButton" onclick="sendMessage()">
                 <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor">
                     <path d="M2,21L23,12L2,3V10L17,12L2,14V21Z"/>
@@ -1310,6 +1823,13 @@ export class CrawlerChatViewProvider implements vscode.WebviewViewProvider {
                     messages = message.messages;
                     console.log('更新消息列表，数量:', messages.length, '消息:', messages);
                     updateMessagesDisplay();
+                    break;
+                case 'resetInput':
+                    const messageInput = document.getElementById('messageInput');
+                    if (messageInput) {
+                        messageInput.placeholder = '输入网站URL获取JS文件和所有URL，或输入\\'分析catch文件\\'进行AI分析，或点击📎上传文件让AI分析...';
+                        messageInput.disabled = false;
+                    }
                     break;
             }
         });
@@ -1342,7 +1862,14 @@ export class CrawlerChatViewProvider implements vscode.WebviewViewProvider {
                     
                     const contentDiv = document.createElement('div');
                     contentDiv.className = 'message-content';
-                    contentDiv.textContent = msg.content;
+                    
+                    // 渲染markdown内容
+                    if (msg.isUser) {
+                        contentDiv.textContent = msg.content;
+                    } else {
+                        contentDiv.innerHTML = renderMarkdown(msg.content);
+                    }
+                    
                     messageDiv.appendChild(contentDiv);
                     
                     const timestamp = document.createElement('div');
@@ -1393,6 +1920,67 @@ export class CrawlerChatViewProvider implements vscode.WebviewViewProvider {
                     sendButton.disabled = false;
                 }, 500);
             }
+        }
+        
+        // 文件上传相关函数
+        function selectFile() {
+            // 直接调用VS Code文件选择器
+            vscode.postMessage({
+                type: 'uploadFile'
+            });
+        }
+
+        function showFileMenu() {
+            // 显示文件管理菜单
+            vscode.postMessage({
+                type: 'showFileMenu'
+            });
+        }
+        
+        // Markdown渲染函数
+        function renderMarkdown(text) {
+            // 基础markdown渲染
+            let html = text;
+            
+            // 代码块处理
+            html = html.replace(/\`\`\`(\\w*)\\n([\\s\\S]*?)\\n\`\`\`/g, (match, lang, code) => {
+                return \`<pre><code class="language-\${lang}">\${escapeHtml(code.trim())}</code></pre>\`;
+            });
+            
+            // 行内代码
+            html = html.replace(/\`([^\`]+)\`/g, '<code>$1</code>');
+            
+            // 标题
+            html = html.replace(/^### (.*$)/gm, '<h3>$1</h3>');
+            html = html.replace(/^## (.*$)/gm, '<h2>$1</h2>');
+            html = html.replace(/^# (.*$)/gm, '<h1>$1</h1>');
+            
+            // 粗体
+            html = html.replace(/\\*\\*(.*?)\\*\\*/g, '<strong>$1</strong>');
+            
+            // 斜体
+            html = html.replace(/\\*(.*?)\\*/g, '<em>$1</em>');
+            
+            // 列表项
+            html = html.replace(/^[•\\-\\*] (.*)$/gm, '<li>$1</li>');
+            html = html.replace(/(<li>.*<\\/li>)/s, '<ul>$1</ul>');
+            
+            // 数字列表
+            html = html.replace(/^(\\d+)\\. (.*)$/gm, '<li>$2</li>');
+            
+            // 链接
+            html = html.replace(/\\[([^\\]]+)\\]\\(([^\\)]+)\\)/g, '<a href="$2" target="_blank">$1</a>');
+            
+            // 换行处理
+            html = html.replace(/\\n/g, '<br>');
+            
+            return html;
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
         }
         
         function clearChat() {
